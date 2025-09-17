@@ -1,0 +1,125 @@
+<Window x:Class="SpaceAccess.Wpf.MainWindow"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+  Title="Makerspace Entry" Height="700" Width="980">
+  <Window.Resources>
+    <SolidColorBrush x:Key="AccentBrush" Color="#FF2D7FF9"/>
+    <SolidColorBrush x:Key="PanelBrush" Color="#FFF7F9FC"/>
+    <Style TargetType="Button">
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="Margin" Value="4,0,0,0"/>
+      <Setter Property="Background" Value="{StaticResource AccentBrush}"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="BorderBrush" Value="#FF1C5FB8"/>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Padding" Value="6,4"/>
+      <Setter Property="Margin" Value="6,0,0,0"/>
+    </Style>
+    <Style TargetType="DataGrid">
+      <Setter Property="RowBackground" Value="White"/>
+      <Setter Property="AlternatingRowBackground" Value="#FFF0F6FF"/>
+      <Setter Property="GridLinesVisibility" Value="None"/>
+    </Style>
+  </Window.Resources>
+  <!-- Replace root Grid with a TabControl containing the existing Grid as first tab -->
+  <TabControl Margin="12">
+  <TabItem Header="Makerspace Entry">
+      <!-- existing Grid content moved here -->
+      <Grid Margin="0"> 
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Input panel -->
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,4" Grid.Row="0" Grid.ColumnSpan="2">
+          <TextBlock VerticalAlignment="Center" Text="Location:"/>
+          <ComboBox x:Name="LocationCombo" Width="200" DisplayMemberPath="Name" SelectedValuePath="Id" Margin="6,0,10,0"/>
+          <TextBlock VerticalAlignment="Center" Text="Student ID:"/>
+          <TextBox x:Name="StudentIdBox" Width="180" Margin="6,0,10,0" KeyDown="StudentIdBox_KeyDown"/>
+          <TextBlock VerticalAlignment="Center" Text="First:"/>
+          <TextBox x:Name="FirstBox" Width="120" Margin="6,0,10,0"/>
+          <TextBlock VerticalAlignment="Center" Text="Last:"/>
+          <TextBox x:Name="LastBox" Width="120" Margin="6,0,10,0"/>
+          <Button x:Name="CheckInBtn" Content="Check In" Width="100" Click="CheckInBtn_Click" Margin="6,0,0,0"/>
+          <!-- CheckOut removed: single entry button only -->
+        </StackPanel>
+
+        <!-- Stats -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,8" Grid.ColumnSpan="2">
+          <TextBlock Text="Occupancy:" FontWeight="Bold"/>
+          <TextBlock x:Name="OccupancyText" Margin="6,0,20,0"/>
+          <TextBlock Text="Capacity:" FontWeight="Bold"/>
+          <TextBlock x:Name="CapacityText" Margin="6,0,20,0"/>
+          <TextBlock Text="Status:" FontWeight="Bold"/>
+          <TextBlock x:Name="StatusText" Margin="6,0,20,0"/>
+          <Button Content="Export CSV" Width="100" Click="Export_Click" Margin="24,0,0,0"/>
+          <Button Content="Refresh" Width="90" Click="Refresh_Click" Margin="6,0,0,0"/>
+          <TextBox x:Name="SearchBox" Width="180" Margin="24,0,0,0"/>
+          <Button Content="Search" Width="80" Click="Search_Click" Margin="6,0,0,0"/>
+          <Button Content="Clear" Width="70" Click="ClearSearch_Click" Margin="6,0,0,0"/>
+        </StackPanel>
+
+        <!-- Event grid -->
+        <DataGrid Grid.Row="2" x:Name="EventsGrid" AutoGenerateColumns="False" IsReadOnly="False" Grid.ColumnSpan="2" 
+                  MouseRightButtonUp="EventsGrid_MouseRightButtonUp">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Time (Local)" Binding="{Binding TimestampLocal}" Width="160" IsReadOnly="True"/>
+            <DataGridTextColumn Header="Type" Binding="{Binding EventType}" Width="90" IsReadOnly="True"/>
+            <DataGridTextColumn Header="Student ID" Binding="{Binding ScannedStudentId}" Width="140" IsReadOnly="True"/>
+            <DataGridTextColumn Header="Name" Binding="{Binding NameAtScan, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="160"/>
+            <DataGridTextColumn Header="Location" Binding="{Binding LocationName}" Width="160" IsReadOnly="True"/>
+          </DataGrid.Columns>
+          <DataGrid.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="Delete Entry" Click="DeleteEntry_Click"/>
+            </ContextMenu>
+          </DataGrid.ContextMenu>
+  </DataGrid>
+
+        <!-- Footer -->
+        <TextBlock Grid.Row="3" Grid.ColumnSpan="2"
+                   Text="Demo: manual entry simulates a scanner. Replace with device SDK later."
+                   Foreground="Gray" Margin="0,8,0,0"/>
+      </Grid>
+    </TabItem>
+
+    <TabItem Header="Manage Locations">
+      <Grid Margin="6">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <!-- list -->
+        <DataGrid x:Name="LocationsGrid" Grid.Row="0" AutoGenerateColumns="False" IsReadOnly="True" Height="240" Margin="0,0,0,8"
+                  SelectionMode="Single" SelectionChanged="LocationsGrid_SelectionChanged">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="*"/>
+            <DataGridTextColumn Header="Capacity" Binding="{Binding Capacity}" Width="120"/>
+          </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- edit form -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,0,0,8">
+          <TextBlock VerticalAlignment="Center" Text="Name:" Margin="0,0,6,0"/>
+          <TextBox x:Name="LocNameBox" Width="240" Margin="0,0,12,0"/>
+          <TextBlock VerticalAlignment="Center" Text="Capacity:" Margin="0,0,6,0"/>
+          <TextBox x:Name="LocCapacityBox" Width="100" Margin="0,0,12,0"/>
+          <Button x:Name="AddLocationBtn" Content="Add" Width="80" Click="AddLocation_Click" Margin="0,0,6,0"/>
+          <Button x:Name="SaveLocationBtn" Content="Save" Width="80" Click="SaveLocation_Click" Margin="0,0,6,0"/>
+          <Button x:Name="DeleteLocationBtn" Content="Delete" Width="80" Click="DeleteLocation_Click"/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="2" Foreground="Gray" Text="Edit spaces here — changes update the Location dropdown in the main tab."/>
+      </Grid>
+    </TabItem>
+  </TabControl>
+</Window>
