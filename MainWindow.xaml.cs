@@ -6,7 +6,15 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+// using System.Windows.Media; // removed logo generation
+// using System.Windows.Media.Imaging;
 using System.Windows;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Windows.Interop;
+using System.Windows.Controls;
 
 namespace SpaceAccess.Wpf;
 
@@ -22,6 +30,316 @@ public partial class MainWindow : Window
         LoadLocations();
         RefreshUi();
     }
+
+    // keyboard hook fields
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYDOWN = 0x0100;
+    private static IntPtr _hookId = IntPtr.Zero;
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+    private LowLevelKeyboardProc? _proc = null;
+    private StringBuilder _kbBuffer = new StringBuilder();
+
+    // Raw Input interop and device selection
+    private HwndSource? _hwndSource;
+    private const int WM_INPUT = 0x00FF;
+    private bool _rawInputRegistered = false;
+    // we no longer rely on deferred device initialization; mark initialized so checkbox works
+    private bool _initializedDevices = true;
+
+    private record RawDeviceInfo
+    {
+        public IntPtr DeviceHandle { get; init; }
+        public string DisplayName { get; init; } = string.Empty;
+    }
+
+    private List<RawDeviceInfo> _rawDevices = new List<RawDeviceInfo>();
+    private Dictionary<IntPtr, StringBuilder> _rawBuffers = new Dictionary<IntPtr, StringBuilder>();
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    private void StartHook()
+    {
+        if (_hookId != IntPtr.Zero) return;
+        _proc = HookCallback;
+        try
+        {
+            using var curProcess = System.Diagnostics.Process.GetCurrentProcess();
+            var moduleName = curProcess.MainModule?.ModuleName;
+            var moduleHandle = GetModuleHandle(moduleName ?? string.Empty);
+            _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _proc!, moduleHandle, 0);
+        }
+        catch
+        {
+            // best-effort; if we can't get module handle, try without it
+            _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _proc!, IntPtr.Zero, 0);
+        }
+    }
+
+    private void StopHook()
+    {
+        if (_hookId == IntPtr.Zero) return;
+        UnhookWindowsHookEx(_hookId);
+        _hookId = IntPtr.Zero;
+    }
+
+    // Register for Raw Input (keyboard-ish devices)
+    private bool RegisterRawInput()
+    {
+        // Ensure we have an HwndSource to receive messages
+        var helper = new WindowInteropHelper(this);
+        var hwnd = helper.Handle;
+        if (hwnd == IntPtr.Zero)
+        {
+            this.SourceInitialized += OnSourceInitialized_RegisterRaw;
+            return false;
+        }
+
+        // ensure we have a single HwndSource hook
+        if (_hwndSource == null)
+        {
+            _hwndSource = HwndSource.FromHwnd(hwnd);
+            if (_hwndSource != null)
+                _hwndSource.AddHook(WndProc);
+        }
+
+        // register for keyboard raw input from all keyboards
+        var rid = new RAWINPUTDEVICE[1];
+        rid[0].usUsagePage = 0x01; // Generic desktop controls
+        rid[0].usUsage = 0x06; // Keyboard
+        rid[0].dwFlags = RIDEV_INPUTSINK; // receive even when not focused
+        rid[0].hwndTarget = hwnd;
+    // try to register
+    var ok = RegisterRawInputDevices(rid, (uint)rid.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
+    _rawInputRegistered = ok;
+        if (!ok)
+        {
+            MessageBox.Show("Failed to register Raw Input devices. Ensure the application has an HWND and try Refresh.\nIf this keeps failing, the scanner may not expose a keyboard HID device.", "Raw Input Registration", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        else
+        {
+            // success
+        }
+
+        return _rawInputRegistered;
+    }
+
+    private void OnSourceInitialized_RegisterRaw(object? s, EventArgs e)
+    {
+        RegisterRawInput();
+        this.SourceInitialized -= OnSourceInitialized_RegisterRaw;
+    }
+
+    private void OnSourceInitialized_InitDevices(object? s, EventArgs e)
+    {
+        try
+        {
+            RefreshDevices();
+            _initializedDevices = true;
+            if (this.FindName("BackgroundListenCheck") is System.Windows.Controls.CheckBox cb && cb.IsChecked == true)
+                RegisterRawInput();
+        }
+        catch { }
+        this.SourceInitialized -= OnSourceInitialized_InitDevices;
+    }
+
+    private void UnregisterRawInput()
+    {
+        if (_hwndSource != null)
+        {
+            try { _hwndSource.RemoveHook(WndProc); } catch { }
+            _hwndSource = null;
+        }
+
+        if (_rawInputRegistered)
+        {
+            // use RIDEV_REMOVE to unregister keyboards
+            var rid = new RAWINPUTDEVICE[1];
+            rid[0].usUsagePage = 0x01;
+            rid[0].usUsage = 0x06;
+            rid[0].dwFlags = RIDEV_REMOVE;
+            rid[0].hwndTarget = IntPtr.Zero;
+            try
+            {
+                RegisterRawInputDevices(rid, (uint)rid.Length, (uint)Marshal.SizeOf<RAWINPUTDEVICE>());
+            }
+            catch { }
+            _rawInputRegistered = false;
+        }
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_INPUT)
+        {
+            HandleRawInput(lParam);
+            handled = false; // allow others to process
+        }
+        return IntPtr.Zero;
+    }
+
+    // Raw input handling removed — no-op since device picker UI was removed
+    private void HandleRawInput(IntPtr lParam)
+    {
+        // Intentionally empty
+        return;
+    }
+
+    private void RefreshDevices()
+    {
+        // Device enumeration removed — keep empty to avoid referencing removed UI controls.
+        _rawDevices.Clear();
+        return;
+    }
+
+    private void RefreshDevices_Click(object sender, RoutedEventArgs e) => RefreshDevices();
+
+    // Raw Input interop constants/types
+    private const uint RIDEV_INPUTSINK = 0x00000100;
+    private const uint RID_INPUT = 0x10000003;
+    private const uint RIDI_DEVICENAME = 0x20000007;
+    private const uint RIDEV_REMOVE = 0x00000001;
+    private const int RIM_TYPEKEYBOARD = 1;
+    private const int RIM_TYPEMOUSE = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTDEVICELIST
+    {
+        public IntPtr hDevice;
+        public uint dwType;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetRawInputDeviceList([In, Out] RAWINPUTDEVICELIST[] pRawInputDeviceList, out uint puiNumDevices, uint cbSize);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int GetRawInputDeviceList(IntPtr pRawInputDeviceList, out uint puiNumDevices, uint cbSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTDEVICE
+    {
+        public ushort usUsagePage;
+        public ushort usUsage;
+        public uint dwFlags;
+        public IntPtr hwndTarget;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterRawInputDevices([In] RAWINPUTDEVICE[] pRawInputDevices, uint uiNumDevices, uint cbSize);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RAWINPUTHEADER
+    {
+        public uint dwType;
+        public uint dwSize;
+        public IntPtr hDevice;
+        public IntPtr wParam;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct RAWKEYBOARD
+    {
+        [FieldOffset(0)] public ushort MakeCode;
+        [FieldOffset(2)] public ushort Flags;
+        [FieldOffset(4)] public ushort Reserved;
+        [FieldOffset(6)] public ushort VKey;
+        [FieldOffset(8)] public uint Message;
+        [FieldOffset(12)] public uint ExtraInformation;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct RAWMOUSE
+    {
+        // not used
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct RAWINPUT
+    {
+        [FieldOffset(0)] public RAWINPUTHEADER header;
+        [FieldOffset(16)] public RAWMOUSE mouse;
+        [FieldOffset(16)] public RAWKEYBOARD keyboard;
+        // Note: layout simplified for keyboard extraction
+        public RAWKEYBOARD data => keyboard;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern uint GetRawInputData(IntPtr hRawInput, uint uiCommand, IntPtr pData, ref uint pcbSize, uint cbSizeHeader);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetRawInputDeviceInfo(IntPtr hDevice, uint uiCommand, StringBuilder pData, ref uint pcbSize);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetRawInputDeviceInfo(IntPtr hDevice, uint uiCommand, IntPtr pData, ref uint pcbSize);
+
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+        {
+            int vkCode = Marshal.ReadInt32(lParam);
+            var key = System.Windows.Input.KeyInterop.KeyFromVirtualKey(vkCode);
+            var ch = VkToChar((System.Windows.Input.Key)key);
+            if (ch != '\0')
+            {
+                if (ch == '\r' || ch == '\n')
+                {
+                    var raw = _kbBuffer.ToString();
+                    _kbBuffer.Clear();
+                    var cleaned = Regex.Replace(raw, "\\s+", "");
+                    Dispatcher.Invoke(() => RecordEvent("entry", cleaned));
+                }
+                else
+                {
+                    _kbBuffer.Append(ch);
+                }
+            }
+        }
+        return CallNextHookEx(_hookId, nCode, wParam, lParam);
+    }
+
+    private char VkToChar(System.Windows.Input.Key key)
+    {
+        if (key >= System.Windows.Input.Key.D0 && key <= System.Windows.Input.Key.D9)
+            return (char)('0' + (key - System.Windows.Input.Key.D0));
+        if (key >= System.Windows.Input.Key.NumPad0 && key <= System.Windows.Input.Key.NumPad9)
+            return (char)('0' + (key - System.Windows.Input.Key.NumPad0));
+        if (key >= System.Windows.Input.Key.A && key <= System.Windows.Input.Key.Z)
+            return (char)('A' + (key - System.Windows.Input.Key.A));
+        if (key == System.Windows.Input.Key.Space) return ' ';
+        if (key == System.Windows.Input.Key.Enter) return '\r';
+        return '\0';
+    }
+
+    private void BackgroundListenCheck_Checked(object sender, RoutedEventArgs e)
+    {
+        // Start the existing global keyboard hook to capture scanner keyboard input in background
+        StartHook();
+    }
+
+    private void BackgroundListenCheck_Unchecked(object sender, RoutedEventArgs e)
+    {
+        // Stop the global hook
+        StopHook();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        StopHook();
+        UnregisterRawInput();
+        base.OnClosed(e);
+    }
+
+    // logo generation removed
 
     private Guid CurrentLocationId =>
         (Guid)(LocationCombo.SelectedValue ?? AccessContext.SeedLocationId);
@@ -198,13 +516,13 @@ public partial class MainWindow : Window
     private string NormalizeScannedId(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return raw;
-        var s = raw.Trim();
-        // if it ends with two digits and total length > 2, trim the last two digits
-        if (s.Length > 2 && int.TryParse(s[^2..], out _))
-        {
-            return s[..^2];
-        }
-        return s;
+        // remove all non-digit characters to ensure we only store numbers
+        var digits = System.Text.RegularExpressions.Regex.Replace(raw, "\\D", "");
+        if (string.IsNullOrWhiteSpace(digits)) return digits;
+        // preserve previous behavior: if length > 2, trim the last two digits (they were scanner suffix)
+        if (digits.Length > 2)
+            return digits.Substring(0, digits.Length - 2);
+        return digits;
     }
 
     private void RecordEvent(string type, string? overrideStudentId = null)

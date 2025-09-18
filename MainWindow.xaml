@@ -39,7 +39,7 @@
         </Grid.ColumnDefinitions>
 
         <!-- Input panel -->
-        <StackPanel Orientation="Horizontal" Margin="0,0,0,4" Grid.Row="0" Grid.ColumnSpan="2">
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,4" Grid.Row="0" Grid.ColumnSpan="2" VerticalAlignment="Center">
           <TextBlock VerticalAlignment="Center" Text="Location:"/>
           <ComboBox x:Name="LocationCombo" Width="200" DisplayMemberPath="Name" SelectedValuePath="Id" Margin="6,0,10,0"/>
           <TextBlock VerticalAlignment="Center" Text="Student ID:"/>
@@ -63,6 +63,7 @@
           <Button Content="Export CSV" Width="100" Click="Export_Click" Margin="24,0,0,0"/>
           <Button Content="Refresh" Width="90" Click="Refresh_Click" Margin="6,0,0,0"/>
           <TextBox x:Name="SearchBox" Width="180" Margin="24,0,0,0"/>
+          <CheckBox x:Name="BackgroundListenCheck" Content="Listen in background" IsChecked="True" Margin="12,0,0,0" Checked="BackgroundListenCheck_Checked" Unchecked="BackgroundListenCheck_Unchecked"/>
           <Button Content="Search" Width="80" Click="Search_Click" Margin="6,0,0,0"/>
           <Button Content="Clear" Width="70" Click="ClearSearch_Click" Margin="6,0,0,0"/>
         </StackPanel>
@@ -86,7 +87,7 @@
 
         <!-- Footer -->
         <TextBlock Grid.Row="3" Grid.ColumnSpan="2"
-                   Text="Demo: manual entry simulates a scanner. Replace with device SDK later."
+                   Text="Developed by Suryash Malviya"
                    Foreground="Gray" Margin="0,8,0,0"/>
       </Grid>
     </TabItem>
