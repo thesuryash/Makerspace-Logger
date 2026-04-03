@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Makerspace Logger Local Adapter</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    .row { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    input, select, button { padding: 8px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f4f4f4; }
+    .meta { margin: 12px 0; font-weight: 600; }
+    .tiny { color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>Makerspace Logger — Temporary Local Web Adapter</h2>
+  <p>Run the local executable, then use this page in browser.</p>
+
+  <div class="row">
+    <input id="studentId" placeholder="Student ID" />
+    <input id="firstName" placeholder="First Name (optional)" />
+    <input id="lastName" placeholder="Last Name (optional)" />
+    <select id="eventType"><option value="entry">entry</option><option value="exit">exit</option><option value="manual">manual</option></select>
+    <button onclick="submitEvent()">Record Event</button>
+  </div>
+
+  <div class="meta" id="summary">Loading summary...</div>
+  <div class="tiny">URL: <code>http://127.0.0.1:5057</code></div>
+
+  <table>
+    <thead><tr><th>When (Local)</th><th>Type</th><th>Student ID</th><th>Name</th><th>Location</th></tr></thead>
+    <tbody id="events"></tbody>
+  </table>
+
+<script>
+async function fetchSummary() {
+  const s = await fetch('/api/summary').then(r => r.json());
+  document.getElementById('summary').innerText = `Occupancy: ${s.occupancy} | Capacity: ${s.capacity ?? '—'} | Status: ${s.status}`;
+}
+
+async function fetchEvents() {
+  const rows = await fetch('/api/events?take=100').then(r => r.json());
+  document.getElementById('events').innerHTML = rows.map(r =>
+    `<tr><td>${r.timestampLocal}</td><td>${r.eventType}</td><td>${r.scannedStudentId}</td><td>${r.nameAtScan || ''}</td><td>${r.locationName}</td></tr>`
+  ).join('');
+}
+
+async function submitEvent() {
+  const payload = {
+    studentId: document.getElementById('studentId').value,
+    firstName: document.getElementById('firstName').value,
+    lastName: document.getElementById('lastName').value,
+    eventType: document.getElementById('eventType').value
+  };
+
+  const resp = await fetch('/api/events', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!resp.ok) {
+    const err = await resp.json();
+    alert(err.error || 'Failed to record event');
+    return;
+  }
+
+  document.getElementById('studentId').value = '';
+  await fetchSummary();
+  await fetchEvents();
+}
+
+fetchSummary();
+fetchEvents();
+setInterval(() => { fetchSummary(); fetchEvents(); }, 5000);
+</script>
+</body>
+</html>
