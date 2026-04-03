@@ -22,14 +22,23 @@ SQLite DB at `%LOCALAPPDATA%\SpaceAccess\access.sqlite`.
 ## Temporary Local Web Adapter (firewall-safe workaround)
 If your institutional environment blocks the packaged WPF installer, you can run a local browser-based adapter that reads/writes the same SQLite DB.
 
-### What it does
-- Hosts a local web app at `http://127.0.0.1:5057`.
-- Uses the same `Users`, `Locations`, and `Events` tables used by the desktop app.
-- Supports entry/exit/manual event recording and occupancy summary.
+### Fastest no-install option for end users
+You can ship this as a **single portable `.exe`** (no .NET install required on the school machine once published):
 
-### Run it
-From repo root:
+1. On a dev machine with .NET SDK, build portable output:
+   ```powershell
+   ./scripts/publish-web-adapter.ps1
+   ```
+2. Copy `dist\LocalWebAdapter-win-x64\LocalWebAdapter.exe` to school PCs.
+3. Run it directly (double-click), then open `http://127.0.0.1:5057`.
 
+Or use:
+```cmd
+scripts\run-web-adapter-portable.cmd
+```
+which starts the exe and opens the browser.
+
+### Dev run (if SDK is already installed)
 ```bash
 ./scripts/run-web-adapter.sh
 ```
@@ -40,9 +49,31 @@ or on Windows PowerShell:
 ./scripts/run-web-adapter.ps1
 ```
 
-Then open `http://127.0.0.1:5057` in any browser already allowed by school policy.
 
-> Tip: Launch the WPF app once first so the DB gets created.
+
+### If you hit merge conflicts
+If Git reports conflicts specifically in LocalWebAdapter files, run:
+
+```powershell
+./scripts/resolve-web-adapter-conflicts.ps1
+```
+
+Then commit:
+
+```powershell
+git commit -m "Resolve LocalWebAdapter merge conflicts"
+```
+
+### HTML mode (open file directly)
+If you want to double-click an HTML file directly:
+
+1. Start `LocalWebAdapter.exe` first (backend API on `http://127.0.0.1:5057`).
+2. Open `LocalWebAdapter/index.html` directly in browser (`file:///...`).
+
+The page auto-targets `http://127.0.0.1:5057` when opened from `file://` and can still read/write through the C# API to SQLite.
+
+### Why not just a standalone HTML file?
+A plain `file:///.../index.html` page cannot safely read/write your local SQLite DB directly in normal school browser policies. The local adapter exe is the thin bridge that serves HTML + API on localhost.
 
 ## Notes
 - Manual entry simulates a scanner. Replace calls in `RecordEvent` with device SDK callback.
