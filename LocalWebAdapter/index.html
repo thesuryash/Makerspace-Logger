@@ -23,11 +23,20 @@
   <div class="tiny">API: <code id="apiBase"></code> <span id="apiStatus"></span></div>
 
   <div class="row">
+    <select id="locationId"></select>
     <input id="studentId" placeholder="Student ID" />
     <input id="firstName" placeholder="First Name (optional)" />
     <input id="lastName" placeholder="Last Name (optional)" />
     <select id="eventType"><option value="entry">entry</option><option value="exit">exit</option><option value="manual">manual</option></select>
     <button onclick="submitEvent()">Record Event</button>
+    <button onclick="exportJson()">Export JSON</button>
+    <button onclick="initDatabase()">Create/Repair DB</button>
+  </div>
+
+  <div class="row">
+    <input id="newLocationName" placeholder="New location name" />
+    <input id="newLocationCapacity" placeholder="Capacity (optional)" />
+    <button onclick="addLocation()">Add Location</button>
   </div>
 
   <div class="meta" id="summary">Loading summary...</div>
@@ -40,6 +49,7 @@
 <script>
 const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5057' : '';
 document.getElementById('apiBase').innerText = API_BASE || '(same-origin)';
+const scannerState = { buffer: '', timer: null };
 
 async function api(path, opts) {
   const response = await fetch(`${API_BASE}${path}`, opts);
@@ -72,7 +82,9 @@ function apiStatus(text, ok) {
 }
 
 async function fetchSummary() {
-  const s = await api('/api/summary');
+  const loc = document.getElementById('locationId').value;
+  const q = loc ? `?locationId=${encodeURIComponent(loc)}` : '';
+  const s = await api(`/api/summary${q}`);
   document.getElementById('summary').innerText = `Occupancy: ${s.occupancy} | Capacity: ${s.capacity ?? '—'} | Status: ${s.status}`;
 }
 
@@ -83,13 +95,22 @@ async function fetchEvents() {
   ).join('');
 }
 
+async function loadLocations() {
+  const rows = await api('/api/locations');
+  const select = document.getElementById('locationId');
+  const current = select.value;
+  select.innerHTML = rows.map(l => `<option value="${l.id}">${l.name}${l.capacity != null ? ` (Cap ${l.capacity})` : ''}</option>`).join('');
+  if (current && rows.some(r => r.id === current)) select.value = current;
+}
+
 async function submitEvent() {
   try {
     const payload = {
       studentId: document.getElementById('studentId').value,
       firstName: document.getElementById('firstName').value,
       lastName: document.getElementById('lastName').value,
-      eventType: document.getElementById('eventType').value
+      eventType: document.getElementById('eventType').value,
+      locationId: document.getElementById('locationId').value
     };
 
     await api('/api/events', {
@@ -109,11 +130,90 @@ async function refreshAll() {
   const healthy = await checkHealth();
   if (!healthy) return;
 
+  await loadLocations();
   await fetchSummary();
   await fetchEvents();
+  focusStudentId();
+}
+
+async function exportJson() {
+  const data = await api('/api/export.json');
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `makerspace-export-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function initDatabase() {
+  await api('/api/admin/init-db', { method: 'POST' });
+  await refreshAll();
+  alert('Database is ready.');
+}
+
+async function addLocation() {
+  const name = document.getElementById('newLocationName').value.trim();
+  const capRaw = document.getElementById('newLocationCapacity').value.trim();
+  if (!name) return alert('Please enter a location name.');
+
+  await api('/api/locations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      capacity: capRaw === '' ? null : Number(capRaw)
+    })
+  });
+
+  document.getElementById('newLocationName').value = '';
+  document.getElementById('newLocationCapacity').value = '';
+  await refreshAll();
+}
+
+function focusStudentId() {
+  document.getElementById('studentId').focus();
+}
+
+function startScannerCapture() {
+  document.addEventListener('keydown', async (e) => {
+    const active = document.activeElement;
+    const isTypingTarget = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT');
+
+    if (!isTypingTarget) {
+      if (/^[0-9A-Za-z]$/.test(e.key)) {
+        scannerState.buffer += e.key;
+        document.getElementById('studentId').value = scannerState.buffer;
+        e.preventDefault();
+      } else if (e.key === 'Enter' && scannerState.buffer.length > 0) {
+        e.preventDefault();
+        await submitEvent();
+        scannerState.buffer = '';
+      }
+    }
+
+    if (scannerState.timer) clearTimeout(scannerState.timer);
+    scannerState.timer = setTimeout(() => { scannerState.buffer = ''; }, 500);
+  });
+
+  document.getElementById('studentId').addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      await submitEvent();
+    }
+  });
+
+  document.getElementById('locationId').addEventListener('change', async () => {
+    await fetchSummary();
+    await fetchEvents();
+  });
 }
 
 refreshAll();
+startScannerCapture();
 setInterval(refreshAll, 5000);
 </script>
 </body>
