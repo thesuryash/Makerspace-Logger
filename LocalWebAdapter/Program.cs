@@ -28,6 +28,7 @@ internal static class Program
 
         var dbPath = ResolveDbPath();
         EnsureDatabaseReady(dbPath);
+        WriteRealtimeCsvSnapshot(dbPath);
 
         app.UseCors("LocalHtmlPolicy");
         app.UseDefaultFiles();
@@ -38,6 +39,7 @@ internal static class Program
         app.MapPost("/api/admin/init-db", () =>
         {
             EnsureDatabaseReady(dbPath);
+            WriteRealtimeCsvSnapshot(dbPath);
             return Results.Ok(new { ok = true, dbPath });
         });
 
@@ -45,7 +47,7 @@ internal static class Program
         {
             using var conn = OpenConnection(dbPath);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT Id, Name, Capacity FROM Locations ORDER BY Name;";
+            cmd.CommandText = "SELECT Id, Name FROM Locations ORDER BY Name;";
 
             var locations = new List<object>();
             using var reader = cmd.ExecuteReader();
@@ -54,8 +56,7 @@ internal static class Program
                 locations.Add(new
                 {
                     id = reader.GetString(0),
-                    name = reader.GetString(1),
-                    capacity = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2)
+                    name = reader.GetString(1)
                 });
             }
 
@@ -71,13 +72,13 @@ internal static class Program
             using var conn = OpenConnection(dbPath);
             var id = Guid.NewGuid().ToString();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "INSERT INTO Locations (Id, Name, Capacity) VALUES ($id, $name, $capacity);";
+            cmd.CommandText = "INSERT INTO Locations (Id, Name, Capacity) VALUES ($id, $name, NULL);";
             cmd.Parameters.AddWithValue("$id", id);
             cmd.Parameters.AddWithValue("$name", body.Name.Trim());
-            cmd.Parameters.AddWithValue("$capacity", body.Capacity is null ? DBNull.Value : body.Capacity.Value);
             cmd.ExecuteNonQuery();
+            WriteRealtimeCsvSnapshot(dbPath);
 
-            return Results.Ok(new { id, name = body.Name.Trim(), capacity = body.Capacity });
+            return Results.Ok(new { id, name = body.Name.Trim() });
         });
 
         app.MapGet("/api/events", (int? take) =>
@@ -122,32 +123,28 @@ LIMIT $take;";
             var selectedLocation = string.IsNullOrWhiteSpace(locationId) ? FirstLocationId(conn) : locationId;
 
             if (string.IsNullOrWhiteSpace(selectedLocation))
-                return Results.Ok(new { occupancy = 0, capacity = (int?)null, status = "NO_LOCATION" });
+                return Results.Ok(new { eventCount = 0, uniqueStudents = 0, lastEventLocal = (string?)null, locationId = (string?)null });
 
-            using var capCmd = conn.CreateCommand();
-            capCmd.CommandText = "SELECT Capacity FROM Locations WHERE Id = $id LIMIT 1;";
-            capCmd.Parameters.AddWithValue("$id", selectedLocation);
-            var capObj = capCmd.ExecuteScalar();
-            int? capacity = capObj is null || capObj == DBNull.Value ? null : Convert.ToInt32(capObj);
+            using var countCmd = conn.CreateCommand();
+            countCmd.CommandText = "SELECT COUNT(*) FROM Events WHERE LocationId = $loc;";
+            countCmd.Parameters.AddWithValue("$loc", selectedLocation);
 
-            using var occCmd = conn.CreateCommand();
-            occCmd.CommandText = @"
-WITH last_by_user AS (
-  SELECT ScannedStudentId, MAX(TimestampUtc) AS Latest
-  FROM Events
-  WHERE LocationId = $loc
-  GROUP BY ScannedStudentId
-)
-SELECT COUNT(*)
-FROM last_by_user l
-JOIN Events e ON e.ScannedStudentId = l.ScannedStudentId AND e.TimestampUtc = l.Latest
-WHERE e.EventType = 'entry' AND e.LocationId = $loc;";
-            occCmd.Parameters.AddWithValue("$loc", selectedLocation);
+            using var uniqCmd = conn.CreateCommand();
+            uniqCmd.CommandText = "SELECT COUNT(DISTINCT ScannedStudentId) FROM Events WHERE LocationId = $loc;";
+            uniqCmd.Parameters.AddWithValue("$loc", selectedLocation);
 
-            var occupancy = Convert.ToInt32(occCmd.ExecuteScalar() ?? 0);
-            var status = capacity.HasValue && occupancy > capacity.Value ? "OVER CAPACITY" : "OK";
+            using var lastCmd = conn.CreateCommand();
+            lastCmd.CommandText = "SELECT TimestampUtc FROM Events WHERE LocationId = $loc ORDER BY TimestampUtc DESC LIMIT 1;";
+            lastCmd.Parameters.AddWithValue("$loc", selectedLocation);
 
-            return Results.Ok(new { occupancy, capacity, status, locationId = selectedLocation });
+            var eventCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
+            var uniqueStudents = Convert.ToInt32(uniqCmd.ExecuteScalar() ?? 0);
+            var lastRaw = lastCmd.ExecuteScalar()?.ToString();
+            var lastEventLocal = string.IsNullOrWhiteSpace(lastRaw)
+                ? null
+                : ParseUtc(lastRaw).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+            return Results.Ok(new { eventCount, uniqueStudents, lastEventLocal, locationId = selectedLocation });
         });
 
         app.MapPost("/api/events", async (HttpRequest request) =>
@@ -156,9 +153,7 @@ WHERE e.EventType = 'entry' AND e.LocationId = $loc;";
             if (body is null || string.IsNullOrWhiteSpace(body.StudentId))
                 return Results.BadRequest(new { error = "studentId is required." });
 
-            var type = string.IsNullOrWhiteSpace(body.EventType) ? "entry" : body.EventType.Trim().ToLowerInvariant();
-            if (type is not ("entry" or "exit" or "manual"))
-                return Results.BadRequest(new { error = "eventType must be entry, exit, or manual." });
+            const string type = "log";
 
             using var conn = OpenConnection(dbPath);
             using var tx = conn.BeginTransaction();
@@ -190,14 +185,32 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
             insert.ExecuteNonQuery();
 
             tx.Commit();
+            WriteRealtimeCsvSnapshot(dbPath);
             return Results.Ok(new { id = eventId, studentId = normalizedId, eventType = type, locationId = locId });
+        });
+
+        app.MapDelete("/api/events/{id}", (string id) =>
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                return Results.BadRequest(new { error = "id is required." });
+
+            using var conn = OpenConnection(dbPath);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM Events WHERE Id = $id;";
+            cmd.Parameters.AddWithValue("$id", id.Trim());
+            var deleted = cmd.ExecuteNonQuery();
+            if (deleted == 0)
+                return Results.NotFound(new { error = "event not found." });
+
+            WriteRealtimeCsvSnapshot(dbPath);
+            return Results.Ok(new { ok = true, deleted });
         });
 
         app.MapGet("/api/export.csv", () =>
         {
             using var conn = OpenConnection(dbPath);
             var csv = new System.Text.StringBuilder();
-            csv.AppendLine("Section,Id,UserId,StudentId,FirstName,LastName,Email,Status,EventType,LocationId,LocationName,Capacity,TimestampUtc,RawPayloadJson");
+            csv.AppendLine("Section,Id,UserId,StudentId,FirstName,LastName,Email,Status,LocationId,LocationName,TimestampUtc,RawPayloadJson");
 
             using (var cmd = conn.CreateCommand())
             {
@@ -214,10 +227,8 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
                         "",
                         "",
                         "",
-                        "",
                         EscapeCsv(reader.GetString(0)),
                         EscapeCsv(reader.GetString(1)),
-                        reader.IsDBNull(2) ? "" : reader.GetInt32(2).ToString(CultureInfo.InvariantCulture),
                         "",
                         ""));
                 }
@@ -238,8 +249,6 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
                         EscapeCsv(reader.IsDBNull(3) ? "" : reader.GetString(3)),
                         EscapeCsv(reader.IsDBNull(4) ? "" : reader.GetString(4)),
                         EscapeCsv(reader.IsDBNull(5) ? "" : reader.GetString(5)),
-                        "",
-                        "",
                         "",
                         "",
                         EscapeCsv(reader.IsDBNull(6) ? "" : reader.GetString(6)),
@@ -267,10 +276,8 @@ ORDER BY e.TimestampUtc DESC;";
                         "",
                         "",
                         "",
-                        EscapeCsv(reader.IsDBNull(4) ? "" : reader.GetString(4)),
                         EscapeCsv(reader.IsDBNull(5) ? "" : reader.GetString(5)),
                         EscapeCsv(reader.GetString(8)),
-                        "",
                         EscapeCsv(reader.IsDBNull(6) ? "" : reader.GetString(6)),
                         EscapeCsv(reader.IsDBNull(7) ? "" : reader.GetString(7))));
                 }
@@ -278,6 +285,16 @@ ORDER BY e.TimestampUtc DESC;";
 
             var bytes = System.Text.Encoding.UTF8.GetBytes(csv.ToString());
             return Results.File(bytes, "text/csv", $"makerspace-export-{DateTime.UtcNow:yyyyMMdd-HHmmss}.csv");
+        });
+
+        app.MapGet("/api/realtime.csv", () =>
+        {
+            var csvPath = ResolveRealtimeCsvPath(dbPath);
+            if (!File.Exists(csvPath))
+                WriteRealtimeCsvSnapshot(dbPath);
+
+            var csv = File.ReadAllText(csvPath);
+            return Results.Text(csv, "text/csv");
         });
 
         app.Run(BaseUrl);
@@ -300,7 +317,15 @@ ORDER BY e.TimestampUtc DESC;";
             return Path.Combine(dir, "access.sqlite");
         }
 
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spaceaccess", "access.sqlite");
+        var fallbackDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spaceaccess");
+        Directory.CreateDirectory(fallbackDir);
+        return Path.Combine(fallbackDir, "access.sqlite");
+    }
+
+    private static string ResolveRealtimeCsvPath(string dbPath)
+    {
+        var dir = Path.GetDirectoryName(dbPath) ?? ".";
+        return Path.Combine(dir, "realtime-export.csv");
     }
 
     private static string FirstLocationId(SqliteConnection conn)
@@ -424,6 +449,34 @@ CREATE INDEX IF NOT EXISTS IX_Events_LocationId_TimestampUtc ON Events(LocationI
         insert.ExecuteNonQuery();
     }
 
+    private static void WriteRealtimeCsvSnapshot(string dbPath)
+    {
+        using var conn = OpenConnection(dbPath);
+        var csv = new System.Text.StringBuilder();
+        csv.AppendLine("EventId,StudentId,NameAtScan,LocationId,LocationName,TimestampUtc");
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+SELECT e.Id, e.ScannedStudentId, e.NameAtScan, e.LocationId, COALESCE(l.Name, '?'), e.TimestampUtc
+FROM Events e
+LEFT JOIN Locations l ON l.Id = e.LocationId
+ORDER BY e.TimestampUtc DESC;";
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            csv.AppendLine(string.Join(",",
+                EscapeCsv(reader.GetString(0)),
+                EscapeCsv(reader.IsDBNull(1) ? "" : reader.GetString(1)),
+                EscapeCsv(reader.IsDBNull(2) ? "" : reader.GetString(2)),
+                EscapeCsv(reader.IsDBNull(3) ? "" : reader.GetString(3)),
+                EscapeCsv(reader.IsDBNull(4) ? "" : reader.GetString(4)),
+                EscapeCsv(reader.IsDBNull(5) ? "" : reader.GetString(5))));
+        }
+
+        File.WriteAllText(ResolveRealtimeCsvPath(dbPath), csv.ToString());
+    }
+
     private static string EscapeCsv(string value)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
@@ -437,10 +490,8 @@ CREATE INDEX IF NOT EXISTS IX_Events_LocationId_TimestampUtc ON Events(LocationI
         string StudentId,
         string? FirstName,
         string? LastName,
-        string? EventType,
         string? LocationId);
 
     private sealed record CreateLocationRequest(
-        string Name,
-        int? Capacity);
+        string Name);
 }
