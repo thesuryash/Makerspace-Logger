@@ -1,0 +1,120 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Makerspace Logger Local Adapter</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    .row { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+    input, select, button { padding: 8px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    th { background: #f4f4f4; }
+    .meta { margin: 12px 0; font-weight: 600; }
+    .tiny { color: #666; font-size: 12px; }
+    .ok { color: #0a7f2e; }
+    .bad { color: #c62828; }
+  </style>
+</head>
+<body>
+  <h2>Makerspace Logger — Local Web App</h2>
+  <p>Runs in browser, backed by local C# adapter + SQLite.</p>
+
+  <div class="tiny">API: <code id="apiBase"></code> <span id="apiStatus"></span></div>
+
+  <div class="row">
+    <input id="studentId" placeholder="Student ID" />
+    <input id="firstName" placeholder="First Name (optional)" />
+    <input id="lastName" placeholder="Last Name (optional)" />
+    <select id="eventType"><option value="entry">entry</option><option value="exit">exit</option><option value="manual">manual</option></select>
+    <button onclick="submitEvent()">Record Event</button>
+  </div>
+
+  <div class="meta" id="summary">Loading summary...</div>
+
+  <table>
+    <thead><tr><th>When (Local)</th><th>Type</th><th>Student ID</th><th>Name</th><th>Location</th></tr></thead>
+    <tbody id="events"></tbody>
+  </table>
+
+<script>
+const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5057' : '';
+document.getElementById('apiBase').innerText = API_BASE || '(same-origin)';
+
+async function api(path, opts) {
+  const response = await fetch(`${API_BASE}${path}`, opts);
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const body = await response.json();
+      message = body.error || message;
+    } catch {}
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+async function checkHealth() {
+  try {
+    await api('/api/health');
+    apiStatus('Connected', true);
+    return true;
+  } catch {
+    apiStatus('Adapter offline', false);
+    return false;
+  }
+}
+
+function apiStatus(text, ok) {
+  const el = document.getElementById('apiStatus');
+  el.innerText = text;
+  el.className = ok ? 'ok' : 'bad';
+}
+
+async function fetchSummary() {
+  const s = await api('/api/summary');
+  document.getElementById('summary').innerText = `Occupancy: ${s.occupancy} | Capacity: ${s.capacity ?? '—'} | Status: ${s.status}`;
+}
+
+async function fetchEvents() {
+  const rows = await api('/api/events?take=100');
+  document.getElementById('events').innerHTML = rows.map(r =>
+    `<tr><td>${r.timestampLocal}</td><td>${r.eventType}</td><td>${r.scannedStudentId}</td><td>${r.nameAtScan || ''}</td><td>${r.locationName}</td></tr>`
+  ).join('');
+}
+
+async function submitEvent() {
+  try {
+    const payload = {
+      studentId: document.getElementById('studentId').value,
+      firstName: document.getElementById('firstName').value,
+      lastName: document.getElementById('lastName').value,
+      eventType: document.getElementById('eventType').value
+    };
+
+    await api('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    document.getElementById('studentId').value = '';
+    await refreshAll();
+  } catch (err) {
+    alert(err.message || 'Failed to record event');
+  }
+}
+
+async function refreshAll() {
+  const healthy = await checkHealth();
+  if (!healthy) return;
+
+  await fetchSummary();
+  await fetchEvents();
+}
+
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>
