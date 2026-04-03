@@ -193,47 +193,60 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
             return Results.Ok(new { id = eventId, studentId = normalizedId, eventType = type, locationId = locId });
         });
 
-        app.MapGet("/api/export.json", () =>
+        app.MapGet("/api/export.csv", () =>
         {
             using var conn = OpenConnection(dbPath);
+            var csv = new System.Text.StringBuilder();
+            csv.AppendLine("Section,Id,UserId,StudentId,FirstName,LastName,Email,Status,EventType,LocationId,LocationName,Capacity,TimestampUtc,RawPayloadJson");
 
-            var locations = new List<object>();
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = "SELECT Id, Name, Capacity FROM Locations ORDER BY Name;";
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
-                    locations.Add(new
-                    {
-                        id = reader.GetString(0),
-                        name = reader.GetString(1),
-                        capacity = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2)
-                    });
+                    csv.AppendLine(string.Join(",",
+                        "location",
+                        EscapeCsv(reader.GetString(0)),
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        EscapeCsv(reader.GetString(0)),
+                        EscapeCsv(reader.GetString(1)),
+                        reader.IsDBNull(2) ? "" : reader.GetInt32(2).ToString(CultureInfo.InvariantCulture),
+                        "",
+                        ""));
                 }
             }
 
-            var users = new List<object>();
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = "SELECT Id, StudentId, FirstName, LastName, Email, Status, CreatedAtUtc FROM Users ORDER BY CreatedAtUtc DESC;";
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
-                    users.Add(new
-                    {
-                        id = reader.GetString(0),
-                        studentId = reader.GetString(1),
-                        firstName = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                        lastName = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                        email = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
-                        status = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
-                        createdAtUtc = reader.IsDBNull(6) ? string.Empty : reader.GetString(6)
-                    });
+                    csv.AppendLine(string.Join(",",
+                        "user",
+                        EscapeCsv(reader.GetString(0)),
+                        "",
+                        EscapeCsv(reader.GetString(1)),
+                        EscapeCsv(reader.IsDBNull(2) ? "" : reader.GetString(2)),
+                        EscapeCsv(reader.IsDBNull(3) ? "" : reader.GetString(3)),
+                        EscapeCsv(reader.IsDBNull(4) ? "" : reader.GetString(4)),
+                        EscapeCsv(reader.IsDBNull(5) ? "" : reader.GetString(5)),
+                        "",
+                        "",
+                        "",
+                        "",
+                        EscapeCsv(reader.IsDBNull(6) ? "" : reader.GetString(6)),
+                        ""));
                 }
             }
 
-            var events = new List<object>();
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText = @"
@@ -245,29 +258,26 @@ ORDER BY e.TimestampUtc DESC;";
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                 {
-                    events.Add(new
-                    {
-                        id = reader.GetString(0),
-                        userId = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                        scannedStudentId = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                        nameAtScan = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
-                        eventType = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
-                        locationId = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
-                        timestampUtc = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
-                        rawPayloadJson = reader.IsDBNull(7) ? "{}" : reader.GetString(7),
-                        locationName = reader.GetString(8)
-                    });
+                    csv.AppendLine(string.Join(",",
+                        "event",
+                        EscapeCsv(reader.GetString(0)),
+                        EscapeCsv(reader.IsDBNull(1) ? "" : reader.GetString(1)),
+                        EscapeCsv(reader.IsDBNull(2) ? "" : reader.GetString(2)),
+                        "",
+                        "",
+                        "",
+                        "",
+                        EscapeCsv(reader.IsDBNull(4) ? "" : reader.GetString(4)),
+                        EscapeCsv(reader.IsDBNull(5) ? "" : reader.GetString(5)),
+                        EscapeCsv(reader.GetString(8)),
+                        "",
+                        EscapeCsv(reader.IsDBNull(6) ? "" : reader.GetString(6)),
+                        EscapeCsv(reader.IsDBNull(7) ? "" : reader.GetString(7))));
                 }
             }
 
-            return Results.Json(new
-            {
-                exportedAtUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
-                dbPath,
-                locations,
-                users,
-                events
-            });
+            var bytes = System.Text.Encoding.UTF8.GetBytes(csv.ToString());
+            return Results.File(bytes, "text/csv", $"makerspace-export-{DateTime.UtcNow:yyyyMMdd-HHmmss}.csv");
         });
 
         app.Run(BaseUrl);
@@ -412,6 +422,15 @@ CREATE INDEX IF NOT EXISTS IX_Events_LocationId_TimestampUtc ON Events(LocationI
         insert.Parameters.AddWithValue("$name", "Main Space");
         insert.Parameters.AddWithValue("$capacity", 100);
         insert.ExecuteNonQuery();
+    }
+
+    private static string EscapeCsv(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var escaped = value.Replace("\"", "\"\"");
+        return (escaped.Contains(',') || escaped.Contains('"') || escaped.Contains('\n') || escaped.Contains('\r'))
+            ? $"\"{escaped}\""
+            : escaped;
     }
 
     private sealed record RecordEventRequest(

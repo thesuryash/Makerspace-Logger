@@ -29,7 +29,7 @@
     <input id="lastName" placeholder="Last Name (optional)" />
     <select id="eventType"><option value="entry">entry</option><option value="exit">exit</option><option value="manual">manual</option></select>
     <button onclick="submitEvent()">Record Event</button>
-    <button onclick="exportJson()">Export JSON</button>
+    <button onclick="exportCsv()">Export CSV</button>
     <button onclick="initDatabase()">Create/Repair DB</button>
   </div>
 
@@ -136,13 +136,14 @@ async function refreshAll() {
   focusStudentId();
 }
 
-async function exportJson() {
-  const data = await api('/api/export.json');
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+async function exportCsv() {
+  const response = await fetch(`${API_BASE}/api/export.csv`);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `makerspace-export-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  a.download = `makerspace-export-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
   document.body.appendChild(a);
   a.click();
   a.remove();
