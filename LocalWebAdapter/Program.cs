@@ -27,17 +27,19 @@ internal static class Program
         var app = builder.Build();
 
         var dbPath = ResolveDbPath();
-        if (!File.Exists(dbPath))
-        {
-            Console.WriteLine($"[adapter] SQLite DB was not found at: {dbPath}");
-            Console.WriteLine("[adapter] Start the WPF app once so it creates the DB, then restart this adapter.");
-        }
+        EnsureDatabaseReady(dbPath);
 
         app.UseCors("LocalHtmlPolicy");
         app.UseDefaultFiles();
         app.UseStaticFiles();
 
         app.MapGet("/api/health", () => Results.Ok(new { ok = true, dbPath }));
+
+        app.MapPost("/api/admin/init-db", () =>
+        {
+            EnsureDatabaseReady(dbPath);
+            return Results.Ok(new { ok = true, dbPath });
+        });
 
         app.MapGet("/api/locations", () =>
         {
@@ -58,6 +60,24 @@ internal static class Program
             }
 
             return Results.Ok(locations);
+        });
+
+        app.MapPost("/api/locations", async (HttpRequest request) =>
+        {
+            var body = await request.ReadFromJsonAsync<CreateLocationRequest>();
+            if (body is null || string.IsNullOrWhiteSpace(body.Name))
+                return Results.BadRequest(new { error = "name is required." });
+
+            using var conn = OpenConnection(dbPath);
+            var id = Guid.NewGuid().ToString();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO Locations (Id, Name, Capacity) VALUES ($id, $name, $capacity);";
+            cmd.Parameters.AddWithValue("$id", id);
+            cmd.Parameters.AddWithValue("$name", body.Name.Trim());
+            cmd.Parameters.AddWithValue("$capacity", body.Capacity is null ? DBNull.Value : body.Capacity.Value);
+            cmd.ExecuteNonQuery();
+
+            return Results.Ok(new { id, name = body.Name.Trim(), capacity = body.Capacity });
         });
 
         app.MapGet("/api/events", (int? take) =>
@@ -173,6 +193,83 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
             return Results.Ok(new { id = eventId, studentId = normalizedId, eventType = type, locationId = locId });
         });
 
+        app.MapGet("/api/export.json", () =>
+        {
+            using var conn = OpenConnection(dbPath);
+
+            var locations = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Id, Name, Capacity FROM Locations ORDER BY Name;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    locations.Add(new
+                    {
+                        id = reader.GetString(0),
+                        name = reader.GetString(1),
+                        capacity = reader.IsDBNull(2) ? (int?)null : reader.GetInt32(2)
+                    });
+                }
+            }
+
+            var users = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT Id, StudentId, FirstName, LastName, Email, Status, CreatedAtUtc FROM Users ORDER BY CreatedAtUtc DESC;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    users.Add(new
+                    {
+                        id = reader.GetString(0),
+                        studentId = reader.GetString(1),
+                        firstName = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                        lastName = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                        email = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                        status = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                        createdAtUtc = reader.IsDBNull(6) ? string.Empty : reader.GetString(6)
+                    });
+                }
+            }
+
+            var events = new List<object>();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = @"
+SELECT e.Id, e.UserId, e.ScannedStudentId, e.NameAtScan, e.EventType, e.LocationId, e.TimestampUtc, e.RawPayloadJson,
+       COALESCE(l.Name, '?') as LocationName
+FROM Events e
+LEFT JOIN Locations l ON l.Id = e.LocationId
+ORDER BY e.TimestampUtc DESC;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    events.Add(new
+                    {
+                        id = reader.GetString(0),
+                        userId = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
+                        scannedStudentId = reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
+                        nameAtScan = reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                        eventType = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                        locationId = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                        timestampUtc = reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
+                        rawPayloadJson = reader.IsDBNull(7) ? "{}" : reader.GetString(7),
+                        locationName = reader.GetString(8)
+                    });
+                }
+            }
+
+            return Results.Json(new
+            {
+                exportedAtUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                dbPath,
+                locations,
+                users,
+                events
+            });
+        });
+
         app.Run(BaseUrl);
     }
 
@@ -187,7 +284,11 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
     {
         var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (!string.IsNullOrWhiteSpace(local))
-            return Path.Combine(local, "SpaceAccess", "access.sqlite");
+        {
+            var dir = Path.Combine(local, "SpaceAccess");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "access.sqlite");
+        }
 
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".spaceaccess", "access.sqlite");
     }
@@ -253,10 +354,74 @@ VALUES ($id, $student, $first, $last, '', 'active', $created);";
         return digits.Length > 2 ? digits[..^2] : digits;
     }
 
+    private static void EnsureDatabaseReady(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath) ?? ".");
+        using var conn = OpenConnection(dbPath);
+        EnsureSchema(conn);
+        EnsureSeedLocation(conn);
+    }
+
+    private static void EnsureSchema(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+CREATE TABLE IF NOT EXISTS Users (
+  Id TEXT NOT NULL PRIMARY KEY,
+  StudentId TEXT NOT NULL,
+  FirstName TEXT NOT NULL DEFAULT '',
+  LastName TEXT NOT NULL DEFAULT '',
+  Email TEXT NOT NULL DEFAULT '',
+  Status TEXT NOT NULL DEFAULT 'active',
+  CreatedAtUtc TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS IX_Users_StudentId ON Users(StudentId);
+
+CREATE TABLE IF NOT EXISTS Locations (
+  Id TEXT NOT NULL PRIMARY KEY,
+  Name TEXT NOT NULL,
+  Capacity INTEGER NULL
+);
+
+CREATE TABLE IF NOT EXISTS Events (
+  Id TEXT NOT NULL PRIMARY KEY,
+  UserId TEXT NULL,
+  ScannedStudentId TEXT NOT NULL,
+  NameAtScan TEXT NOT NULL DEFAULT '',
+  EventType TEXT NOT NULL,
+  LocationId TEXT NOT NULL,
+  TimestampUtc TEXT NOT NULL,
+  RawPayloadJson TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS IX_Events_LocationId_TimestampUtc ON Events(LocationId, TimestampUtc);";
+        cmd.ExecuteNonQuery();
+    }
+
+    private static void EnsureSeedLocation(SqliteConnection conn)
+    {
+        using var check = conn.CreateCommand();
+        check.CommandText = "SELECT COUNT(1) FROM Locations;";
+        var count = Convert.ToInt32(check.ExecuteScalar() ?? 0);
+        if (count > 0) return;
+
+        using var insert = conn.CreateCommand();
+        insert.CommandText = "INSERT INTO Locations (Id, Name, Capacity) VALUES ($id, $name, $capacity);";
+        insert.Parameters.AddWithValue("$id", "11111111-1111-1111-1111-111111111111");
+        insert.Parameters.AddWithValue("$name", "Main Space");
+        insert.Parameters.AddWithValue("$capacity", 100);
+        insert.ExecuteNonQuery();
+    }
+
     private sealed record RecordEventRequest(
         string StudentId,
         string? FirstName,
         string? LastName,
         string? EventType,
         string? LocationId);
+
+    private sealed record CreateLocationRequest(
+        string Name,
+        int? Capacity);
 }
