@@ -40,8 +40,13 @@
   <div class="meta" id="summary">Loading summary...</div>
   <div class="tiny">Live CSV endpoint: <a id="liveCsvLink" target="_blank" rel="noopener">open realtime.csv</a></div>
 
+  <div class="row">
+    <button onclick="deleteSelectedEvents()">Delete Selected</button>
+    <span class="tiny" id="selectedCount">0 selected</span>
+  </div>
+
   <table>
-    <thead><tr><th>When (Local)</th><th>Student ID</th><th>Name</th><th>Location</th><th>Remove</th></tr></thead>
+    <thead><tr><th><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" /></th><th>When (Local)</th><th>Student ID</th><th>Name</th><th>Location</th><th>Remove</th></tr></thead>
     <tbody id="events"></tbody>
   </table>
 
@@ -49,6 +54,7 @@
 const API_BASE = (location.protocol === 'file:') ? 'http://127.0.0.1:5057' : '';
 document.getElementById('apiBase').innerText = API_BASE || '(same-origin)';
 const scannerState = { buffer: '', timer: null };
+const selectedEventIds = new Set();
 
 async function api(path, opts) {
   const response = await fetch(`${API_BASE}${path}`, opts);
@@ -89,8 +95,14 @@ async function fetchSummary() {
 
 async function fetchEvents() {
   const rows = await api('/api/events?take=100');
+  const currentIds = new Set(rows.map(r => r.id));
+  for (const id of [...selectedEventIds]) {
+    if (!currentIds.has(id)) selectedEventIds.delete(id);
+  }
+
   document.getElementById('events').innerHTML = rows.map(r =>
     `<tr>
+      <td><input type="checkbox" data-event-id="${r.id}" ${selectedEventIds.has(r.id) ? 'checked' : ''} onchange="toggleEventSelection('${r.id}', this.checked)" /></td>
       <td>${r.timestampLocal}</td>
       <td>${r.scannedStudentId}</td>
       <td>${r.nameAtScan || ''}</td>
@@ -98,6 +110,8 @@ async function fetchEvents() {
       <td><button onclick="deleteEvent('${r.id}')">x</button></td>
     </tr>`
   ).join('');
+
+  syncSelectionUi();
 }
 
 async function loadLocations() {
@@ -182,7 +196,48 @@ async function deleteEvent(eventId) {
   if (!ok) return;
 
   await api(`/api/events/${encodeURIComponent(eventId)}`, { method: 'DELETE' });
+  selectedEventIds.delete(eventId);
   await refreshAll();
+}
+
+function toggleEventSelection(eventId, checked) {
+  if (checked) selectedEventIds.add(eventId);
+  else selectedEventIds.delete(eventId);
+  syncSelectionUi();
+}
+
+function toggleSelectAll(checked) {
+  const boxes = document.querySelectorAll('#events input[data-event-id]');
+  boxes.forEach((box) => {
+    const id = box.getAttribute('data-event-id');
+    if (!id) return;
+    box.checked = checked;
+    if (checked) selectedEventIds.add(id);
+    else selectedEventIds.delete(id);
+  });
+  syncSelectionUi();
+}
+
+async function deleteSelectedEvents() {
+  if (selectedEventIds.size === 0) return alert('Select at least one data point.');
+  const ok = confirm(`Delete ${selectedEventIds.size} selected data point(s) permanently?`);
+  if (!ok) return;
+
+  await api('/api/events/bulk-delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [...selectedEventIds] })
+  });
+
+  selectedEventIds.clear();
+  await refreshAll();
+}
+
+function syncSelectionUi() {
+  document.getElementById('selectedCount').innerText = `${selectedEventIds.size} selected`;
+  const boxes = document.querySelectorAll('#events input[data-event-id]');
+  const allSelected = boxes.length > 0 && [...boxes].every(b => b.checked);
+  document.getElementById('selectAll').checked = allSelected;
 }
 
 function focusStudentId() {

@@ -206,6 +206,34 @@ VALUES ($id, $userId, $studentId, $nameAtScan, $eventType, $locationId, $timesta
             return Results.Ok(new { ok = true, deleted });
         });
 
+        app.MapPost("/api/events/bulk-delete", async (HttpRequest request) =>
+        {
+            var body = await request.ReadFromJsonAsync<BulkDeleteEventsRequest>();
+            var ids = body?.Ids?
+                .Where(i => !string.IsNullOrWhiteSpace(i))
+                .Select(i => i.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToArray() ?? Array.Empty<string>();
+
+            if (ids.Length == 0)
+                return Results.BadRequest(new { error = "ids must contain at least one event id." });
+
+            using var conn = OpenConnection(dbPath);
+            using var tx = conn.BeginTransaction();
+            var deletedTotal = 0;
+            foreach (var eventId in ids)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM Events WHERE Id = $id;";
+                cmd.Parameters.AddWithValue("$id", eventId);
+                deletedTotal += cmd.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+            WriteRealtimeCsvSnapshot(dbPath);
+            return Results.Ok(new { ok = true, requested = ids.Length, deleted = deletedTotal });
+        });
+
         app.MapGet("/api/export.csv", () =>
         {
             using var conn = OpenConnection(dbPath);
@@ -494,4 +522,7 @@ ORDER BY e.TimestampUtc DESC;";
 
     private sealed record CreateLocationRequest(
         string Name);
+
+    private sealed record BulkDeleteEventsRequest(
+        string[] Ids);
 }
